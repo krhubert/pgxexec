@@ -1,0 +1,18 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "schema.sql"
+    queries: "queries.sql"
+    gen:
+      go:
+        sql_package: "pgx/v5"
+        package: "gensqlc"
+        out: "gensqlc"
+        emit_exact_table_names: true
+        emit_methods_with_db_argument: false
+        emit_params_struct_pointers: false
+        emit_result_struct_pointers: false
+        emit_interface: true
+        emit_empty_slices: true
+        wrap_errors: true
+        initialisms: []
