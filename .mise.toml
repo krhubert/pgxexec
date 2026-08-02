@@ -1,0 +1,6 @@
+[settings]
+experimental = true
+activate_aggressive = true
+
+[tools]
+"go:github.com/sqlc-dev/sqlc/cmd/sqlc" = "v1.31.1"
