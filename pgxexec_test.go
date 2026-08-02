@@ -143,7 +143,7 @@ func TestExecutorErrorHandle(t *testing.T) {
 	err := exec.Queries().UserDeleteById(ctx, 1)
 	assertError(t, err)
 
-	t.Run("ExecuteInTx with Executor", func(t *testing.T) {
+	t.Run("ExecInTx with Executor", func(t *testing.T) {
 		err := exec.ExecInTx(ctx, func(tx *gensqlc.Queries) error {
 			return tx.UserDeleteById(ctx, 1)
 		})
@@ -170,7 +170,7 @@ func TestExecutorErrorHandle(t *testing.T) {
 		assertError(t, err)
 	})
 
-	t.Run("ExecuteInTx with pgx.Tx", func(t *testing.T) {
+	t.Run("ExecInTx with pgx.Tx", func(t *testing.T) {
 		db := &errDB{row: errRow{}, noBeginError: true}
 		exec := NewExecutor(db, gensqlc.New(db))
 
