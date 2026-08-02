@@ -24,33 +24,15 @@ type QTx[Q any] interface {
 	WithTx(tx pgx.Tx) *Q
 }
 
-// Querier defines an interface for retrieving sqlc.Queries.
-type Querier[Q any, Queries QTx[Q]] interface {
-	Queries() Queries
-}
-
-// ExecutorDBTX defines an interface that is shared between
-// Executor and Tx, allowing for transaction management and query execution.
-type ExecutorDBTX[Q any, Queries QTx[Q]] interface {
-	Querier[Q, Queries]
-	Begin(ctx context.Context) (Tx[Q, Queries], error)
-}
-
-// Executor defines an interface for executing queries and managing transactions on database.
-type Executor[Q any, Queries QTx[Q]] interface {
-	ExecutorDBTX[Q, Queries]
-	BeginTx(ctx context.Context, opts pgx.TxOptions) (Tx[Q, Queries], error)
-	ExecInTx(ctx context.Context, fn func(tx Queries) error) error
-	InTx(ctx context.Context, fn func(tx Tx[Q, Queries]) error) error
-}
-
-// Tx defines an interface for executing queries within a transaction.
-type Tx[Q any, Queries QTx[Q]] interface {
-	ExecutorDBTX[Q, Queries]
-	ExecInTx(ctx context.Context, fn func(tx Queries) error) error
-	InTx(ctx context.Context, fn func(tx Tx[Q, Queries]) error) error
-	Commit(ctx context.Context) error
-	Rollback(ctx context.Context) error
+// Executor executes sqlc queries and manages transactions on a database.
+//
+// To avoid repeating the type parameters, define an alias for
+// your sqlc.Queries type:
+//
+//	type Executor = pgxexec.Executor[gensqlc.Queries, *gensqlc.Queries]
+type Executor[Q any, Queries QTx[Q]] struct {
+	q    Queries
+	dbtx PgxTxBeginner
 }
 
 // NewExecutor creates a new [Executor] instance that can manage transactions and
@@ -59,147 +41,104 @@ func NewExecutor[Q any, Queries QTx[Q]](
 	dbtx PgxTxBeginner,
 	queries Queries,
 ) Executor[Q, Queries] {
-	return executor[Q, Queries]{
+	return Executor[Q, Queries]{
 		q:    queries,
 		dbtx: dbtx,
 	}
 }
 
-type TxExecutor[Q QTx[Q]] = Tx[Q, Q]
-
-// executor implements the [Executor] interface, providing methods to execute queries
-// and manage transactions using a [pgx.Conn] or [pgxpool.Pool].
-type executor[Q any, Queries QTx[Q]] struct {
-	q    Queries
-	dbtx PgxTxBeginner
-}
-
 // Queries returns the sqlc.Queries instance associated with the executor.
-func (e executor[Q, Queries]) Queries() Queries {
+func (e Executor[Q, Queries]) Queries() Queries {
 	return e.q
 }
 
 // Begin starts a new transaction using the underlying [PgxTxBeginner] interface.
 // see [pgx.Conn.Begin] or [pgxpool.Pool.Begin] for more details.
-func (e executor[Q, Queries]) Begin(ctx context.Context) (Tx[Q, Queries], error) {
+func (e Executor[Q, Queries]) Begin(ctx context.Context) (Tx[Q, Queries], error) {
 	tx, err := e.dbtx.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("pgxexec begin: %w", err)
+		return Tx[Q, Queries]{}, fmt.Errorf("pgxexec begin: %w", err)
 	}
 
-	return newExecutorTx(tx, e.q), nil
+	return newTx(tx, e.q), nil
 }
 
 // BeginTx starts a new transaction with the specified options using
 // the underlying [PgxTxBeginner] interface.
 //
 // see [pgx.TxOptions] for more details on transaction options.
-func (e executor[Q, Queries]) BeginTx(
+func (e Executor[Q, Queries]) BeginTx(
 	ctx context.Context,
 	opts pgx.TxOptions,
 ) (Tx[Q, Queries], error) {
 	tx, err := e.dbtx.BeginTx(ctx, opts)
 	if err != nil {
-		return nil, fmt.Errorf("pgxexec begin tx: %w", err)
+		return Tx[Q, Queries]{}, fmt.Errorf("pgxexec begin tx: %w", err)
 	}
 
-	return newExecutorTx(tx, e.q), nil
+	return newTx(tx, e.q), nil
 }
 
-// InTx starts a new transaction with the specified options using
-// the underlying [PgxTxBeginner] interface.
-func (e executor[Q, Queries]) ExecInTx(
+// ExecInTx runs fn inside a new transaction started via the underlying
+// [PgxTxBeginner] interface, committing on success and rolling back on error.
+func (e Executor[Q, Queries]) ExecInTx(
 	ctx context.Context,
 	fn func(tx Queries) error,
-) (err error) {
-	tx, err := e.dbtx.Begin(ctx)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err != nil {
-			err1 := tx.Rollback(ctx)
-			if err1 != nil {
-				err = errors.Join(err, err1)
-			}
-		}
-	}()
-
-	txq := newExecutorTx(tx, e.q)
-	if err := fn(txq.Queries()); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
+) error {
+	return queryInTx(e.Begin, ctx, fn)
 }
 
-// InTx starts a new transaction with the specified options using
-// the underlying [PgxTxBeginner] interface.
-func (e executor[Q, Queries]) InTx(
+// InTx runs fn inside a new transaction started via the underlying
+// [PgxTxBeginner] interface, committing on success and rolling back on error.
+func (e Executor[Q, Queries]) InTx(
 	ctx context.Context,
 	fn func(tx Tx[Q, Queries]) error,
-) (err error) {
-	tx, err := e.dbtx.Begin(ctx)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err != nil {
-			err1 := tx.Rollback(ctx)
-			if err1 != nil {
-				err = errors.Join(err, err1)
-			}
-		}
-	}()
-
-	txq := newExecutorTx(tx, e.q)
-	if err := fn(txq); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
+) error {
+	return execInTx(e.Begin, ctx, fn)
 }
 
-// executorTx implements the [Tx] interface, providing methods to execute queries.
-type executorTx[Q any, Queries QTx[Q]] struct {
+// Tx executes sqlc queries within a transaction.
+//
+// To avoid repeating the type parameters, define an alias for
+// your sqlc.Queries type:
+//
+//	type TxQueries = pgxexec.Tx[gensqlc.Queries, *gensqlc.Queries]
+type Tx[Q any, Queries QTx[Q]] struct {
 	q  Queries
 	tx pgx.Tx
 }
 
-// newExecutorTx creates a new executorTx instance with
-// the provided transaction and queries.
-func newExecutorTx[Q any, Queries QTx[Q]](
+// newTx creates a new [Tx] instance with the provided transaction and queries.
+func newTx[Q any, Queries QTx[Q]](
 	tx pgx.Tx,
 	queries Queries,
-) executorTx[Q, Queries] {
-	return executorTx[Q, Queries]{
+) Tx[Q, Queries] {
+	return Tx[Q, Queries]{
 		q:  queries.WithTx(tx),
 		tx: tx,
 	}
 }
 
 // Queries returns the sqlc.Queries instance associated
-// with the transaction executor.
-func (e executorTx[Q, Queries]) Queries() Queries {
+// with the transaction.
+func (e Tx[Q, Queries]) Queries() Queries {
 	return e.q
 }
 
 // Begin starts a pseudo nested transaction.
 // see [pgx.Tx.Begin] for more details.
-func (e executorTx[Q, Queries]) Begin(ctx context.Context) (Tx[Q, Queries], error) {
+func (e Tx[Q, Queries]) Begin(ctx context.Context) (Tx[Q, Queries], error) {
 	tx, err := e.tx.Begin(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("pgxexec tx begin: %w", err)
+		return Tx[Q, Queries]{}, fmt.Errorf("pgxexec tx begin: %w", err)
 	}
 
-	return newExecutorTx(tx, e.q), nil
+	return newTx(tx, e.q), nil
 }
 
 // Commit the current transaction.
 // see [pgx.Tx.Commit] for more details.
-func (e executorTx[Q, Queries]) Commit(ctx context.Context) error {
+func (e Tx[Q, Queries]) Commit(ctx context.Context) error {
 	if err := e.tx.Commit(ctx); err != nil {
 		return fmt.Errorf("pgxexec tx commit: %w", err)
 	}
@@ -208,63 +147,76 @@ func (e executorTx[Q, Queries]) Commit(ctx context.Context) error {
 
 // Rollback the current transaction.
 // see [pgx.Tx.Rollback] for more details.
-func (e executorTx[Q, Queries]) Rollback(ctx context.Context) error {
+func (e Tx[Q, Queries]) Rollback(ctx context.Context) error {
 	if err := e.tx.Rollback(ctx); err != nil {
 		return fmt.Errorf("pgxexec tx rollback: %w", err)
 	}
 	return nil
 }
 
-// InTx starts a new transaction with the specified options using
-// the underlying [pgx.Tx] interface.
+// ExecInTx runs fn inside a nested transaction started via the underlying
+// [pgx.Tx] interface, committing on success and rolling back on error.
 //
 // see [pgx.Tx.Begin] for more details.
-func (e executorTx[Q, Queries]) ExecInTx(ctx context.Context, fn func(tx Queries) error) (err error) {
-	tx, err := e.tx.Begin(ctx)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err != nil {
-			err1 := tx.Rollback(ctx)
-			if err1 != nil {
-				err = errors.Join(err, err1)
-			}
-		}
-	}()
-
-	txq := newExecutorTx(tx, e.q)
-	if err := fn(txq.Queries()); err != nil {
-		return err
-	}
-
-	return tx.Commit(ctx)
+func (e Tx[Q, Queries]) ExecInTx(
+	ctx context.Context,
+	fn func(tx Queries) error,
+) error {
+	return queryInTx(e.Begin, ctx, fn)
 }
 
-// WithTx starts a new transaction with the specified options using
-// the underlying [pgx.Tx] interface.
+// InTx runs fn inside a nested transaction started via the underlying
+// [pgx.Tx] interface, committing on success and rolling back on error.
 //
 // see [pgx.Tx.Begin] for more details.
-func (e executorTx[Q, Queries]) InTx(ctx context.Context, fn func(tx Tx[Q, Queries]) error) (err error) {
-	tx, err := e.tx.Begin(ctx)
+func (e Tx[Q, Queries]) InTx(
+	ctx context.Context,
+	fn func(tx Tx[Q, Queries]) error,
+) error {
+	return execInTx(e.Begin, ctx, fn)
+}
+
+func queryInTx[Q any, Queries QTx[Q]](
+	begin func(ctx context.Context) (Tx[Q, Queries], error),
+	ctx context.Context,
+	fn func(tx Queries) error,
+) error {
+	tx, err := begin(ctx)
 	if err != nil {
 		return err
 	}
+	return runInTx(ctx, tx, func() error { return fn(tx.Queries()) })
+}
 
+func execInTx[Q any, Queries QTx[Q]](
+	begin func(ctx context.Context) (Tx[Q, Queries], error),
+	ctx context.Context,
+	fn func(tx Tx[Q, Queries]) error,
+) error {
+	tx, err := begin(ctx)
+	if err != nil {
+		return err
+	}
+	return runInTx(ctx, tx, func() error { return fn(tx) })
+}
+
+// runInTx calls fn, committing tx on success and rolling it back on error.
+// If the rollback itself fails, its error is joined with fn's error.
+func runInTx[Q any, Queries QTx[Q]](
+	ctx context.Context,
+	tx Tx[Q, Queries],
+	fn func() error,
+) (err error) {
 	defer func() {
 		if err != nil {
-			err1 := tx.Rollback(ctx)
-			if err1 != nil {
+			if err1 := tx.Rollback(ctx); err1 != nil {
 				err = errors.Join(err, err1)
 			}
 		}
 	}()
 
-	txq := newExecutorTx(tx, e.q)
-	if err := fn(txq); err != nil {
+	if err := fn(); err != nil {
 		return err
 	}
-
 	return tx.Commit(ctx)
 }
