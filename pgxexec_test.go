@@ -21,11 +21,11 @@ var schema string
 func TestExecutor(t *testing.T) {
 	tests := []struct {
 		name        string
-		execFactory func(t *testing.T) (Executor[gensqlc.Queries, *gensqlc.Queries], error)
+		execFactory func(t *testing.T) (Executor[*gensqlc.Queries], error)
 	}{
 		{
 			name: "pgxconn",
-			execFactory: func(t *testing.T) (Executor[gensqlc.Queries, *gensqlc.Queries], error) {
+			execFactory: func(t *testing.T) (Executor[*gensqlc.Queries], error) {
 				conn, err := pgx.Connect(t.Context(), "postgres://postgres:postgres@localhost:5432/postgres")
 				assertNoError(t, err)
 				_, err = conn.Exec(t.Context(), schema)
@@ -36,7 +36,7 @@ func TestExecutor(t *testing.T) {
 		},
 		{
 			name: "pgxpool",
-			execFactory: func(t *testing.T) (Executor[gensqlc.Queries, *gensqlc.Queries], error) {
+			execFactory: func(t *testing.T) (Executor[*gensqlc.Queries], error) {
 				pool, err := pgxpool.New(t.Context(), "postgres://postgres:postgres@localhost:5432/postgres")
 				assertNoError(t, err)
 				_, err = pool.Exec(t.Context(), schema)
@@ -70,12 +70,12 @@ func TestExecutor(t *testing.T) {
 			}
 
 			t.Run("InTx", func(t *testing.T) {
-				err = exec.InTx(ctx, func(tx Tx[gensqlc.Queries, *gensqlc.Queries]) error {
+				err = exec.InTx(ctx, func(tx Tx[*gensqlc.Queries]) error {
 					user, err := tx.Queries().UserInsert(ctx, userparam)
 					if err != nil {
 						return err
 					}
-					return tx.InTx(ctx, func(tx Tx[gensqlc.Queries, *gensqlc.Queries]) error {
+					return tx.InTx(ctx, func(tx Tx[*gensqlc.Queries]) error {
 						tx.ExecInTx(ctx, func(tx *gensqlc.Queries) error {
 							_, err := tx.UserGetById(ctx, user.Id)
 							return err

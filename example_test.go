@@ -14,7 +14,7 @@ import (
 // TxQueries is a type alias for pgxexec.Tx with the specific sqlc.Queries type,
 // use as a convenient shorthand for working with transactions in the context
 // of the generated sqlc queries.
-type TxQueries = pgxexec.Tx[gensqlc.Queries, *gensqlc.Queries]
+type TxQueries = pgxexec.Tx[*gensqlc.Queries]
 
 func Example() {
 	ctx := context.Background()
